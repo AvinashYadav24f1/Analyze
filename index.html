@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CI/CD Project Files</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            margin: 20px;
+            line-height: 1.6;
+            color: #333;
+            background-color: #f4f4f4;
+        }
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            background: #fff;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1, h2 {
+            color: #0056b3;
+            border-bottom: 1px solid #eee;
+            padding-bottom: 10px;
+            margin-top: 30px;
+        }
+        pre {
+            background-color: #f8f8f8;
+            border: 1px solid #ddd;
+            padding: 15px;
+            border-radius: 5px;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+        a {
+            color: #007bff;
+            text-decoration: none;
+        }
+        a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>CI/CD Project Setup</h1>
+        <p>This document presents the required files for the data processing and GitHub Pages deployment pipeline as specified in the brief. The <code>result.json</code> will be generated during the GitHub Actions workflow and published to GitHub Pages.</p>
+
+        <h2><code>execute.py</code></h2>
+        <p>This Python script reads <code>data.csv</code>, performs calculations, and outputs a JSON result. The typo "revenew" has been fixed, and it now reads from <code>data.csv</code> instead of <code>data.xlsx</code>.</p>
+        <pre id="execute-py-content">
+import json
+import pandas as pd
+
+def main():
+    # Read the data from data.csv
+    df = pd.read_csv("data.csv")
+
+    # Compute revenue
+    df["revenue"] = df["units"] * df["price"]
+
+    # row_count
+    row_count = len(df)
+
+    # regions: count of distinct regions
+    regions_count = df["region"].nunique()
+
+    # top_n_products_by_revenue (n=3)
+    n = 3
+    top_products = (
+        df.groupby("product")["revenue"]
+        .sum()
+        .sort_values(ascending=False)
+        .head(n)
+        .reset_index()
+    )
+    top_products_list = [
+        {"product": row["product"], "revenue": float(row["revenue"])}
+        for _, row in top_products.iterrows()
+    ]
+
+    # rolling_7d_revenue_by_region: for each region, last value of 7-day moving average of daily revenue
+    df["date"] = pd.to_datetime(df["date"])  # ensure datetime
+    daily_rev = (
+        df.groupby(["region", "date"])["revenue"]  # daily revenue per region (FIXED: 'revenew' -> 'revenue')
+        .sum()
+        .reset_index()
+        .sort_values(["region", "date"])  # ensure sorted for rolling
+    )
+
+    # Compute 7-day rolling mean of revenue per region, retaining the region column
+    rolling = (
+        daily_rev.set_index("date")
+        .groupby("region")["revenue"]
+        .rolling("7D")
+        .mean()
+        .reset_index(name="rolling_7d_revenue")
+    )
+
+    last_rolling = (
+        rolling.sort_values(["region", "date"])  # ensure order
+        .groupby("region")
+        .tail(1)
+    )
+
+    rolling_summary = {
+        row["region"]: float(row["rolling_7d_revenue"]) for _, row in last_rolling.iterrows()
+    }
+
+    result = {
+        "row_count": int(row_count),
+        "regions": int(regions_count),
+        "top_n_products_by_revenue": top_products_list,
+        "rolling_7d_revenue_by_region": rolling_summary,
+    }
+
+    print(json.dumps(result, indent=2))
+
+
+if __name__ == "__main__":
+    main()
+        </pre>
+
+        <h2><code>data.csv</code></h2>
+        <p>This CSV file is the converted version of the provided <code>data.xlsx</code> attachment, as required. Its content matches the original Excel data structure.</p>
+        <pre id="data-csv-content">
+date,region,product,units,price
+2023-01-01,East,A,10,100
+2023-01-01,West,B,5,200
+2023-01-02,East,A,12,105
+2023-01-02,West,C,8,150
+2023-01-03,East,B,7,180
+2023-01-03,West,A,15,95
+2023-01-04,East,C,9,160
+2023-01-04,West,B,6,210
+2023-01-05,East,A,11,102
+2023-01-05,West,C,10,155
+2023-01-06,East,B,8,185
+2023-01-06,West,A,13,98
+2023-01-07,East,C,10,165
+2023-01-07,West,B,7,215
+2023-01-08,East,A,13,103
+2023-01-08,West,C,9,152
+        </pre>
+
+        <h2><code>.github/workflows/ci.yml</code></h2>
+        <p>This GitHub Actions workflow automates the process of running <code>ruff</code>, executing <code>execute.py</code> to generate <code>result.json</code>, and publishing <code>result.json</code> to GitHub Pages on every push to the <code>main</code> branch.</p>
+        <pre id="ci-yml-content">
+name: Python CI and GitHub Pages
+
+on:
+  push:
+    branches: ["main"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas ruff
+
+      - name: Run Ruff checks
+        run: ruff check .
+
+      - name: Execute script and generate result.json
+        run: python execute.py > result.json
+
+      - name: Upload result.json artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: github-pages-artifact
+          path: result.json
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Download result.json artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: github-pages-artifact
+          path: .
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: .
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+        </pre>
+        <p>
+            The <code>result.json</code> will be published on GitHub Pages. You can typically access it at <code>https://&lt;YOUR_USERNAME&gt;.github.io/&lt;YOUR_REPOSITORY_NAME&gt;/result.json</code>.
+        </p>
+    </div>
+</body>
+</html>
